@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────
 
 CLUB_NAME_MAP = {
-    # Flashscore/Archivos -> Tu CSV de comparación (10 años)
     "Lube Civitanova": "Lube",
     "LubeCivitanova": "Lube",
     "Trentino": "Trento",
@@ -29,20 +28,34 @@ CLUB_NAME_MAP = {
     "Vibo Valentia": "Vibo Valentia",
     "Castellana Grotte": "Castellana Grotte New Mater",
     "Acicastello": "Acicastello",
-    "Saturnia Acicastello": "Acicastello"
+    "Saturnia Acicastello": "Acicastello",
+    "Sviluppo Sud Catania": "Acicastello",    # Sviluppo Sud Catania es el equipo de Catania/Acicastello en 2025/2026
 }
 
-def normalize_club(name: str) -> str:
+# Equipos que cambiaron de nombre en una temporada concreta.
+# Formato: {(nombre_en_matches, season): nombre_en_df_teams}
+CLUB_SEASON_MAP = {
+    ("Cisterna", "2020/2021"): "Cisterna Top Volley",
+    ("Cisterna", "2021/2022"): "Cisterna Top Volley",
+    ("Cisterna", "2022/2023"): "Cisterna Top Volley",
+}
+
+def normalize_club(name: str, season: str = None) -> str:
     if not isinstance(name, str): return name
     # Limpiar nombres duplicados (Lube CivitanovaLube Civitanova -> Lube Civitanova)
-    # Buscamos si la cadena contiene una repetición exacta
     s = name.strip()
     mid = len(s) // 2
     if len(s) > 4 and s[:mid] == s[mid:]:
         s = s[:mid]
-    
-    # Aplicar mapa de nombres
-    return CLUB_NAME_MAP.get(s, s)
+
+    # Aplicar mapa de nombres genérico
+    s = CLUB_NAME_MAP.get(s, s)
+
+    # Aplicar mapa temporada-específico (ej: Cisterna -> Cisterna Top Volley en ciertas temporadas)
+    if season is not None:
+        s = CLUB_SEASON_MAP.get((s, season), s)
+
+    return s
 
 
 # ─────────────────────────────────────────────
@@ -92,16 +105,17 @@ def load_team_data(path: str) -> pd.DataFrame:
     return df
 
 
-# 2. Carga de jugadores corregida (Extrae el nombre del archivo)
+# 2. Carga de jugadores corregida (Extrae el nombre del archivo completo)
 def load_player_data(paths: list) -> pd.DataFrame:
     frames = []
     for p in paths:
         try:
             df = pd.read_csv(p)
-            # ¡IMPORTANTE! Extraemos el nombre del equipo del nombre del archivo
-            # Ej: "LubeCivitanova_historial_10_años.csv" -> "Lube Civitanova"
+            # Extraemos el nombre completo del equipo del nombre del archivo.
+            # Ej: "Lube Civitanova_historial_10_años.csv" -> "Lube Civitanova"
+            # Usamos el sufijo conocido "_historial_10_años.csv" para quitar la parte fija.
             filename = os.path.basename(p)
-            team_name_from_file = filename.split('_')[0]
+            team_name_from_file = filename.replace("_historial_10_años.csv", "").replace("_", " ")
             
             df['ID_Equipo'] = team_name_from_file
             frames.append(df)
@@ -113,13 +127,28 @@ def load_player_data(paths: list) -> pd.DataFrame:
 def load_matches(paths: list) -> pd.DataFrame:
     """
     Carga y concatena varios archivos de enfrentamientos directos.
-    Normaliza nombres de clubes automáticamente.
-    Espera columnas: season, home_club, away_club, home_sets, away_sets
+    
+    CORRECCIÓN: La columna 'season' en los CSVs está incorrectamente fijada a
+    '2025/2026' en todos los archivos. Se deriva la temporada correcta a partir
+    del nombre del archivo (ej: enfrentamientos_directos_20202021.csv -> 2020/2021).
+    
+    También aplica normalización de nombres con conciencia de temporada para
+    manejar equipos que cambiaron de nombre (ej: Cisterna / Cisterna Top Volley).
     """
-    frames = [pd.read_csv(p) for p in paths]
+    frames = []
+    for p in paths:
+        df = pd.read_csv(p)
+        # Extraer temporada del nombre del archivo
+        fname = os.path.basename(p)
+        year_code = fname.replace("enfrentamientos_directos_", "").replace(".csv", "")
+        if len(year_code) == 8 and year_code.isdigit():
+            correct_season = f"{year_code[:4]}/{year_code[4:]}"
+            df["season"] = correct_season
+        # Normalizar con la season correcta para resolver alias temporales
+        df["home_club"] = df.apply(lambda r: normalize_club(r["home_club"], r["season"]), axis=1)
+        df["away_club"] = df.apply(lambda r: normalize_club(r["away_club"], r["season"]), axis=1)
+        frames.append(df)
     df = pd.concat(frames, ignore_index=True)
-    df["home_club"] = df["home_club"].apply(normalize_club)
-    df["away_club"] = df["away_club"].apply(normalize_club)
     return df
 
 
@@ -183,7 +212,8 @@ def build_player_features(df_players: pd.DataFrame) -> pd.DataFrame:
         return x
     
     df["season"] = df["season"].apply(fix_season_player)
-    df["club"] = df["club"].apply(normalize_club)
+    # Normalizar nombre con conciencia de temporada para alias como Cisterna Top Volley
+    df["club"] = df.apply(lambda r: normalize_club(r["club"], r["season"]), axis=1)
     df["weight"] = pd.to_numeric(df["sets_played"], errors='coerce').fillna(0)
 
     PLAYER_COLS = ["att_effic", "serve_ace_per_set", "rec_effic", "block_per_set"]
@@ -424,21 +454,27 @@ if __name__ == "__main__":
     # ── Predicción de un partido nuevo ─────────
     print("\n=== PREDICCIÓN DE EJEMPLO ===")
     result = model.predict(
-        home_club="Grottazzolina",  # Usa el nombre corto que está en tu Excel de 10 años
-        away_club="Perugia",
+        home_club="Cisterna",  # Usa el nombre corto que está en tu Excel de 10 años
+        away_club="Verona",
         season="2024/2025",
     )
-    print(f"Grottazzolina: {result['home_sets_rounded']} sets  ({result['home_sets']})")
-    print(f"Perugia:         {result['away_sets_rounded']} sets  ({result['away_sets']})")
+    print(f"Cisterna: {result['home_sets_rounded']} sets  ({result['home_sets']})")
+    print(f"Verona:         {result['away_sets_rounded']} sets  ({result['away_sets']})")
 
 
     # --- LÍNEAS DE DIAGNÓSTICO ---
-    print(f"Ejemplo nombres en df_teams: {df_teams['club'].unique()[:5]}")
+    print(f"\nEjemplo nombres en df_teams: {df_teams['club'].unique()[:5]}")
     print(f"Ejemplo temporadas en df_teams: {df_teams['season'].unique()[:5]}")
     print(f"Ejemplo nombres en matches: {matches['home_club'].unique()[:5]}")
-    print(f"Ejemplo temporadas en matches: {matches['season'].unique()[:5]}")
+    print(f"Ejemplo temporadas en matches: {sorted(matches['season'].unique())}")
 
     # Verificar si hay filas sin NaNs
-    non_nan_rows = dataset.dropna(subset=[c for c in dataset.columns if 'diff_' in c])
-    print(f"\nPartidos con datos completos encontrados: {len(non_nan_rows)} de {len(dataset)}")
-    # -----------------------------
+    diff_cols = [c for c in dataset.columns if 'diff_' in c]
+    non_nan_rows = dataset.dropna(subset=diff_cols)
+    nan_rows = dataset[dataset[diff_cols].isna().any(axis=1)]
+    print(f"\n✅ Partidos con datos completos: {len(non_nan_rows)} de {len(dataset)}")
+    if len(nan_rows) > 0:
+        print(f"⚠️  Partidos con datos incompletos (NaN): {len(nan_rows)}")
+        # Mostrar qué equipos/temporadas siguen sin datos
+        incomplete = nan_rows[["season","home_club","away_club"]].copy()
+        print(incomplete.value_counts(["season","home_club","away_club"]).head(20).to_string())
