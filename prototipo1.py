@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────
 
 CLUB_NAME_MAP = {
+    # Flashscore/Archivos -> Tu CSV de comparación (10 años)
     "Lube Civitanova": "Lube",
     "LubeCivitanova": "Lube",
     "Trentino": "Trento",
@@ -29,7 +30,8 @@ CLUB_NAME_MAP = {
     "Castellana Grotte": "Castellana Grotte New Mater",
     "Acicastello": "Acicastello",
     "Saturnia Acicastello": "Acicastello",
-    "Sviluppo Sud Catania": "Acicastello",    # Sviluppo Sud Catania es el equipo de Catania/Acicastello en 2025/2026
+    # Sviluppo Sud Catania es el equipo de Catania/Acicastello en 2025/2026
+    "Sviluppo Sud Catania": "Acicastello",
 }
 
 # Equipos que cambiaron de nombre en una temporada concreta.
@@ -198,8 +200,11 @@ def build_player_features(df_players: pd.DataFrame) -> pd.DataFrame:
         "ID_Equipo": "club",
         "Temporada": "season",
         "ATTACK_Effic.": "att_effic",
+        "ATTACK_Exc. %": "att_exc_pct",       # CORREGIDO: faltaba en el mapeo
         "SERVE_Ace per Set": "serve_ace_per_set",
+        "SERVE_Effic.": "serve_effic",         # CORREGIDO: faltaba en el mapeo
         "RECEPTION_Effic.": "rec_effic",
+        "RECEPTION_Exc. %": "rec_exc_pct",     # CORREGIDO: faltaba en el mapeo
         "BLOCK_Points per Set": "block_per_set"
     })
 
@@ -216,7 +221,12 @@ def build_player_features(df_players: pd.DataFrame) -> pd.DataFrame:
     df["club"] = df.apply(lambda r: normalize_club(r["club"], r["season"]), axis=1)
     df["weight"] = pd.to_numeric(df["sets_played"], errors='coerce').fillna(0)
 
-    PLAYER_COLS = ["att_effic", "serve_ace_per_set", "rec_effic", "block_per_set"]
+    PLAYER_COLS = [
+        "att_effic", "att_exc_pct",           # ataque
+        "serve_ace_per_set", "serve_effic",   # saque
+        "rec_effic", "rec_exc_pct",           # recepción
+        "block_per_set",                      # bloqueo
+    ]
 
     records = []
     for (club, season), g in df.groupby(["club", "season"]):
@@ -241,11 +251,14 @@ FEATURE_COLS = [
     "att_exc_pct", "att_effic", "att_err_rate", "att_blocked_rate",
     "block_rate", "block_per_set",
     "attack_pressure", "bp_ratio",
-    # Jugadores (agregados)
-    "player_att_effic_wmean", "player_serve_ace_per_set_wmean",
-    "player_rec_effic_wmean", "player_block_per_set_wmean",
-    "player_serve_effic_wmean", "player_att_exc_pct_wmean",
-    "player_rec_exc_pct_wmean",
+    # Jugadores (medias ponderadas por sets jugados)
+    "player_att_effic_wmean",           # eficiencia ataque
+    "player_att_exc_pct_wmean",         # % excelentes ataque   ← antes 100% NaN
+    "player_serve_ace_per_set_wmean",   # aces por set
+    "player_serve_effic_wmean",         # eficiencia saque      ← antes 100% NaN
+    "player_rec_effic_wmean",           # eficiencia recepción
+    "player_rec_exc_pct_wmean",         # % excelentes recepción ← antes 100% NaN
+    "player_block_per_set_wmean",       # bloqueos por set
 ]
 
 
@@ -396,7 +409,7 @@ class SetPredictor:
             "importance": self.model_home.feature_importances_,
         }).sort_values("importance", ascending=False)
         return imp
-
+    
 
 # ─────────────────────────────────────────────
 # 6. PIPELINE COMPLETO
@@ -454,12 +467,12 @@ if __name__ == "__main__":
     # ── Predicción de un partido nuevo ─────────
     print("\n=== PREDICCIÓN DE EJEMPLO ===")
     result = model.predict(
-        home_club="Cisterna",  # Usa el nombre corto que está en tu Excel de 10 años
-        away_club="Verona",
+        home_club="Grottazzolina",  # Usa el nombre corto que está en tu Excel de 10 años
+        away_club="Perugia",
         season="2024/2025",
     )
-    print(f"Cisterna: {result['home_sets_rounded']} sets  ({result['home_sets']})")
-    print(f"Verona:         {result['away_sets_rounded']} sets  ({result['away_sets']})")
+    print(f"Grottazzolina: {result['home_sets_rounded']} sets  ({result['home_sets']})")
+    print(f"Perugia:         {result['away_sets_rounded']} sets  ({result['away_sets']})")
 
 
     # --- LÍNEAS DE DIAGNÓSTICO ---
@@ -475,6 +488,5 @@ if __name__ == "__main__":
     print(f"\n✅ Partidos con datos completos: {len(non_nan_rows)} de {len(dataset)}")
     if len(nan_rows) > 0:
         print(f"⚠️  Partidos con datos incompletos (NaN): {len(nan_rows)}")
-        # Mostrar qué equipos/temporadas siguen sin datos
         incomplete = nan_rows[["season","home_club","away_club"]].copy()
         print(incomplete.value_counts(["season","home_club","away_club"]).head(20).to_string())
