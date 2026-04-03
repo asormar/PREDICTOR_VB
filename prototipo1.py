@@ -200,11 +200,8 @@ def build_player_features(df_players: pd.DataFrame) -> pd.DataFrame:
         "ID_Equipo": "club",
         "Temporada": "season",
         "ATTACK_Effic.": "att_effic",
-        "ATTACK_Exc. %": "att_exc_pct",       # CORREGIDO: faltaba en el mapeo
         "SERVE_Ace per Set": "serve_ace_per_set",
-        "SERVE_Effic.": "serve_effic",         # CORREGIDO: faltaba en el mapeo
         "RECEPTION_Effic.": "rec_effic",
-        "RECEPTION_Exc. %": "rec_exc_pct",     # CORREGIDO: faltaba en el mapeo
         "BLOCK_Points per Set": "block_per_set"
     })
 
@@ -221,12 +218,7 @@ def build_player_features(df_players: pd.DataFrame) -> pd.DataFrame:
     df["club"] = df.apply(lambda r: normalize_club(r["club"], r["season"]), axis=1)
     df["weight"] = pd.to_numeric(df["sets_played"], errors='coerce').fillna(0)
 
-    PLAYER_COLS = [
-        "att_effic", "att_exc_pct",           # ataque
-        "serve_ace_per_set", "serve_effic",   # saque
-        "rec_effic", "rec_exc_pct",           # recepción
-        "block_per_set",                      # bloqueo
-    ]
+    PLAYER_COLS = ["att_effic", "serve_ace_per_set", "rec_effic", "block_per_set"]
 
     records = []
     for (club, season), g in df.groupby(["club", "season"]):
@@ -251,14 +243,11 @@ FEATURE_COLS = [
     "att_exc_pct", "att_effic", "att_err_rate", "att_blocked_rate",
     "block_rate", "block_per_set",
     "attack_pressure", "bp_ratio",
-    # Jugadores (medias ponderadas por sets jugados)
-    "player_att_effic_wmean",           # eficiencia ataque
-    "player_att_exc_pct_wmean",         # % excelentes ataque   ← antes 100% NaN
-    "player_serve_ace_per_set_wmean",   # aces por set
-    "player_serve_effic_wmean",         # eficiencia saque      ← antes 100% NaN
-    "player_rec_effic_wmean",           # eficiencia recepción
-    "player_rec_exc_pct_wmean",         # % excelentes recepción ← antes 100% NaN
-    "player_block_per_set_wmean",       # bloqueos por set
+    # Jugadores (agregados)
+    "player_att_effic_wmean", "player_serve_ace_per_set_wmean",
+    "player_rec_effic_wmean", "player_block_per_set_wmean",
+    "player_serve_effic_wmean", "player_att_exc_pct_wmean",
+    "player_rec_exc_pct_wmean",
 ]
 
 
@@ -409,7 +398,39 @@ class SetPredictor:
             "importance": self.model_home.feature_importances_,
         }).sort_values("importance", ascending=False)
         return imp
-    
+
+    def save(self, path: str = "model/predictor_vb.pkl") -> None:
+        """
+        Guarda el modelo completo (modelos LightGBM + scaler + features de equipos)
+        en un único archivo .pkl usando joblib.
+
+        Ejemplo:
+            model.save("model/predictor_vb.pkl")
+        """
+        import joblib
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        joblib.dump(self, path)
+        size_kb = os.path.getsize(path) / 1024
+        print(f"✅ Modelo guardado en '{path}' ({size_kb:.1f} KB)")
+
+    @classmethod
+    def load(cls, path: str = "model/predictor_vb.pkl") -> "SetPredictor":
+        """
+        Carga un modelo previamente guardado con save().
+        No necesita reentrenar ni cargar datos.
+
+        Ejemplo:
+            model = SetPredictor.load("model/predictor_vb.pkl")
+            result = model.predict("Perugia", "Trento", "2024/2025")
+        """
+        import joblib
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"No se encontró el modelo en '{path}'. "
+                                    f"Entrena primero con prototipo1.py.")
+        model = joblib.load(path)
+        print(f"✅ Modelo cargado desde '{path}'")
+        return model
+
 
 # ─────────────────────────────────────────────
 # 6. PIPELINE COMPLETO
@@ -460,6 +481,10 @@ if __name__ == "__main__":
     model.fit(dataset)
     model._store_team_features(df_teams, df_player_feat)
 
+    # ── Guardar modelo ─────────────────────────
+    MODEL_PATH = "model/predictor_vb.pkl"
+    model.save(MODEL_PATH)
+
     # ── Importancia de features ────────────────
     print("\nTop 10 features más importantes:")
     print(model.feature_importance().head(10).to_string(index=False))
@@ -490,3 +515,16 @@ if __name__ == "__main__":
         print(f"⚠️  Partidos con datos incompletos (NaN): {len(nan_rows)}")
         incomplete = nan_rows[["season","home_club","away_club"]].copy()
         print(incomplete.value_counts(["season","home_club","away_club"]).head(20).to_string())
+
+    # ── Demo: cargar el modelo guardado y predecir sin reentrenar ──
+    print("\n" + "─"*50)
+    print("DEMO — Carga del modelo guardado (sin reentrenar)")
+    print("─"*50)
+    model2 = SetPredictor.load(MODEL_PATH)
+    result2 = model2.predict("Grottazzolina", "Perugia", "2024/2025")
+    print(f"Grottazzolina: {result2['home_sets_rounded']} sets  ({result2['home_sets']})")
+    print(f"Perugia:       {result2['away_sets_rounded']} sets  ({result2['away_sets']})")
+    print("\n💡 Para predecir sin reentrenar, usa en tu código:")
+    print("   from prototipo1 import SetPredictor")
+    print(f"   model = SetPredictor.load('{MODEL_PATH}')")
+    print("   result = model.predict('Equipo Local', 'Equipo Visitante', '2024/2025')")
