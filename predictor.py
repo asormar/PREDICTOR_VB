@@ -23,15 +23,14 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-# ═════════════════════════════════════════════
-# CONFIGURACIÓN — Edita aquí tu predicción
-# ═════════════════════════════════════════════
+
+# CONFIGURACIÓN
 
 # Opciones: 2021_2022 | 2022_2023 | 2023_2024 | 2024_2025 | 2025_2026
 MODELO_HASTA = "2024_2025"
 
-HOME_CLUB = "Perugia"
-AWAY_CLUB = "Milano"
+HOME_CLUB = "Verona"
+AWAY_CLUB = "Modena"
 SEASON    = "2024/2025"   # Temporada de las stats a usar
 
 
