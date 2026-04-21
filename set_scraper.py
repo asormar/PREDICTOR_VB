@@ -133,6 +133,7 @@ CONFRONTI = (
 SERIE_A1 = 1
 SERIE_A2 = 3
 
+MIN_SEASON_YEAR = 2016   # Descartar partidos anteriores a 2016/2017
 DELAY = 1.5
 
 HEADERS = {
@@ -241,6 +242,13 @@ def scrape_confronti(
         local     = normalize_name(local_raw)
         visitante = normalize_name(visitante_raw)
         temporada = parse_season(season_raw)
+
+        # Filtrar temporadas anteriores al mínimo configurado
+        try:
+            if int(temporada.split("/")[0]) < MIN_SEASON_YEAR:
+                continue
+        except (ValueError, IndexError):
+            pass
 
         # ID único de partido: temporada + equipos ordenados + jornada
         # Ordenamos los equipos para que A-vs-B y B-vs-A generen el mismo ID
