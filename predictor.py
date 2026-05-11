@@ -40,7 +40,7 @@ from trainer import (
 
 MODEL_PATH = "model/vb_transformer.pkl"
 
-HOME_CLUB = "Padova"
+HOME_CLUB = "Milano"
 AWAY_CLUB = "Monza"
 SEASON    = "2024/2025"
 
@@ -98,22 +98,20 @@ def marcador_estimado(prob_local: float, set_num: int) -> tuple:
 # PROBABILIDAD DE PARTIDO (Monte Carlo)
 # ═════════════════════════════════════════════════════════════════
 
-def prob_partido_mc(prob_set_local: float,
-                    sets_local: int, sets_visit: int,
-                    n_sim: int = 2000) -> float:
-    if sets_local == 3: return 1.0
-    if sets_visit == 3: return 0.0
-    rng  = np.random.default_rng(42)
-    sims = rng.random((n_sim, 5))
-    wins = 0
-    for sim in sims:
-        sl, sv = sets_local, sets_visit
-        for s in sim:
-            if sl >= 3 or sv >= 3: break
-            if s < prob_set_local: sl += 1
-            else:                  sv += 1
-        if sl >= 3: wins += 1
-    return wins / n_sim
+def actualizar_prob_partido(prob_match, prob_set, gana_local):
+    """
+    Actualiza suavemente la probabilidad global del partido
+    según el resultado del set.
+    """
+
+    impacto = abs(prob_set - 0.5) * 0.35
+
+    if gana_local:
+        prob_match += impacto * (1.0 - prob_match)
+    else:
+        prob_match -= impacto * prob_match
+
+    return float(np.clip(prob_match, 0.01, 0.99))
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -289,32 +287,65 @@ def predecir_set(vb: VBTransformerPredictor,
     return float(probs[1])   # prob de que gane el local
 
 
-def simular_sets(vb: VBTransformerPredictor,
-                 home: str, away: str, season: str,
-                 total_sets: int) -> None:
+def simular_sets(
+        vb,
+        home,
+        away,
+        season,
+        total_sets,
+        prob_match_local,
+    ):
     W = 60
     sets_local = sets_visit = 0
     print(f"\n  SIMULACIÓN SET A SET")
     print(f"  {'─' * (W - 4)}")
+    
+    prob_partido_actual = prob_match_local
 
     for set_num in range(1, total_sets + 1):
-        prob_l = predecir_set(vb, home, away, season, set_num=set_num,
-                              sets_local_antes=sets_local - (1 if sets_local > 0 and set_num > 1 else 0),
-                              sets_visit_antes=sets_visit - (1 if sets_visit > 0 and set_num > 1 else 0))
+        # El partido termina cuando alguien llega a 3 sets
+        if sets_local >= 3 or sets_visit >= 3:
+            break
+        prob_l = predecir_set(
+            vb,
+            home,
+            away,
+            season,
+            set_num=set_num,
+            sets_local_antes=sets_local,
+            sets_visit_antes=sets_visit,
+        )
+        
         if prob_l is None:
             print("  ⚠️  SetTransformer no disponible para este partido.")
             break
 
+        # Combinar predicción del set con la del partido
+        prob_l = 0.7 * prob_l + 0.3 * prob_match_local
+
+        # Calibrar probabilidades extremas
+        prob_l = calibrar_probabilidad(prob_l)
+
         prob_v    = 1.0 - prob_l
-        gana_l    = prob_l >= 0.5
+        gana_l = np.random.random() < prob_l
         ganador   = home if gana_l else away
 
         ptl, ptv, lmin, lmax, vmin, vmax = marcador_estimado(prob_l, set_num)
 
-        prob_antes = prob_partido_mc(prob_l, sets_local, sets_visit)
-        if gana_l: sets_local += 1
-        else:      sets_visit += 1
-        prob_desp  = prob_partido_mc(prob_l, sets_local, sets_visit)
+        prob_antes = prob_partido_actual
+
+        if gana_l:
+            sets_local += 1
+        else:
+            sets_visit += 1
+
+        prob_partido_actual = actualizar_prob_partido(
+            prob_partido_actual,
+            prob_l,
+            gana_l
+        )
+
+        prob_desp = prob_partido_actual
 
         delta = prob_desp - prob_antes
         tend  = "↑" if delta > 0.05 else ("↓" if delta < -0.05 else "→")
@@ -343,6 +374,21 @@ def simular_sets(vb: VBTransformerPredictor,
     print(f"  {home} {sets_local}  —  {sets_visit} {away}".center(W))
     print(f"  Ganador: {ganador_final}".center(W))
     print(f"{'═' * W}\n")
+
+def calibrar_probabilidad(prob: float,
+                           strength: float = 0.4,
+                           min_p: float = 0.15,
+                           max_p: float = 0.85) -> float:
+    """
+    Reduce probabilidades extremas y mejora calibración.
+    """
+    # Comprimir hacia 0.5
+    prob = 0.5 + (prob - 0.5) * strength
+
+    # Limitar extremos
+    prob = np.clip(prob, min_p, max_p)
+
+    return float(prob)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -390,14 +436,26 @@ if __name__ == "__main__":
         # alta confianza (>70%) → probablemente 3-0 o 3-1 (3-4 sets)
         # baja confianza (<60%) → probablemente 3-2 (5 sets)
         prob_max = max(res["prob_local"], res["prob_visit"])
-        total = 3 if prob_max > 0.75 else (4 if prob_max > 0.60 else 5)
+        if prob_max > 0.80:
+            total = 3
+        elif prob_max > 0.65:
+            total = 4
+        else:
+            total = 5
         print(f"  Sets estimados   : {total}")
 
         # 3. Simulación set a set
         print(f"\n{'─' * W}")
         print(f"  MÓDULO 2 — Simulación set a set")
         print(f"{'─' * W}")
-        simular_sets(vb, HOME_CLUB, AWAY_CLUB, SEASON, total_sets=total)
+        simular_sets(
+            vb,
+            HOME_CLUB,
+            AWAY_CLUB,
+            SEASON,
+            total_sets=total,
+            prob_match_local=res["prob_local"],
+        )
     else:
         print("  No se pudo generar predicción.")
 

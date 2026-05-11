@@ -759,13 +759,27 @@ if __name__ == "__main__":
         va_loader = DataLoader(va_ds, batch_size=32)
 
         set_cfg = dict(n_players=TOP_PLAYERS, n_stats=5,
-                       d_model=32, nhead=4, num_layers=2, dropout=0.1)
+                       d_model=16, nhead=2, num_layers=1, dropout=0.1)
         set_model = SetTransformer(**set_cfg).to(DEVICE)
 
+        labels = [s["gana_local"] for s in tr_s]
+        counts = np.bincount(labels, minlength=2).astype(float)
+        counts = np.where(counts == 0, 1, counts)
+
+        weights = (len(labels) / (len(counts) * counts)).tolist()
+
+        print(f"  Pesos de clase sets: {[round(w,2) for w in weights]}")
+
         set_model = train_model(
-            set_model, tr_loader, va_loader,
-            epochs=80, lr=1e-3, device=DEVICE, name="SetTransformer"
-        )
+            set_model,
+            tr_loader,
+            va_loader,
+            epochs=80,
+            lr=1e-3,
+            device=DEVICE,
+            name="SetTransformer",
+            class_weights=weights,
+)
 
     # ── Guardar ────────────────────────────────────────────────────
     vb = VBTransformerPredictor()
