@@ -40,8 +40,8 @@ from trainer import (
 
 MODEL_PATH = "model/vb_transformer.pkl"
 
-HOME_CLUB = "Lube"
-AWAY_CLUB = "Milano"
+HOME_CLUB = "Padova"
+AWAY_CLUB = "Monza"
 SEASON    = "2024/2025"
 
 
@@ -237,14 +237,16 @@ def predecir_partido(vb: VBTransformerPredictor,
         logits = vb.match_model(t_l, t_v)
         probs  = torch.softmax(logits, dim=-1).squeeze().numpy()
 
+    # 3 clases: 0=local gana, 1=visitante gana
     pred_idx = int(probs.argmax())
-    resultado = MATCH_RESULTS[pred_idx]
+    prob_local  = float(probs[0])
+    prob_visit  = float(probs[1])
 
     return {
-        "resultado":    resultado,
-        "probs":        {r: float(p) for r, p in zip(MATCH_RESULTS, probs)},
-        "prob_local":   sum(float(p) for r, p in zip(MATCH_RESULTS, probs)
-                            if int(r.split("-")[0]) > int(r.split("-")[1])),
+        "resultado":  "local" if pred_idx == 0 else "visitante",
+        "prob_local": prob_local,
+        "prob_visit": prob_visit,
+        "probs":      {"local gana": prob_local, "visitante gana": prob_visit},
     }
 
 
@@ -253,7 +255,10 @@ def predecir_partido(vb: VBTransformerPredictor,
 # ═════════════════════════════════════════════════════════════════
 
 def predecir_set(vb: VBTransformerPredictor,
-                 home: str, away: str, season: str) -> float | None:
+                 home: str, away: str, season: str,
+                 set_num: int = 1,
+                 sets_local_antes: int = 0,
+                 sets_visit_antes: int = 0) -> float | None:
     """Devuelve P(gana local el set) usando el SetTransformer."""
     if vb.set_model is None or vb.set_scaler is None:
         return None
@@ -267,7 +272,13 @@ def predecir_set(vb: VBTransformerPredictor,
     if fl is None or fv is None:
         return None
 
-    x = np.concatenate([fl, fv]).reshape(1, -1)
+    ctx = np.array([
+        set_num / 5.0,
+        sets_local_antes / 3.0,
+        sets_visit_antes / 3.0,
+        (sets_local_antes - sets_visit_antes) / 2.0,
+    ], dtype=np.float32)
+    x = np.concatenate([fl, fv, ctx]).reshape(1, -1)
     x = vb.set_scaler.transform(x)
     t = torch.tensor(x, dtype=torch.float32)
 
@@ -287,7 +298,9 @@ def simular_sets(vb: VBTransformerPredictor,
     print(f"  {'─' * (W - 4)}")
 
     for set_num in range(1, total_sets + 1):
-        prob_l = predecir_set(vb, home, away, season)
+        prob_l = predecir_set(vb, home, away, season, set_num=set_num,
+                              sets_local_antes=sets_local - (1 if sets_local > 0 and set_num > 1 else 0),
+                              sets_visit_antes=sets_visit - (1 if sets_visit > 0 and set_num > 1 else 0))
         if prob_l is None:
             print("  ⚠️  SetTransformer no disponible para este partido.")
             break
@@ -366,16 +379,19 @@ if __name__ == "__main__":
     res = predecir_partido(vb, HOME_CLUB, AWAY_CLUB, SEASON)
 
     if res:
-        sl, sv = map(int, res["resultado"].split("-"))
-        total  = sl + sv
-        ganador = HOME_CLUB if sl > sv else AWAY_CLUB
-        print(f"\n  {HOME_CLUB:<28} {sl} sets")
-        print(f"  {AWAY_CLUB:<28} {sv} sets")
-        print(f"  → Ganador: {ganador}  (prob. victoria local: {res['prob_local']:.1%})")
-        print(f"\n  Probabilidades por resultado:")
-        for r, p in sorted(res["probs"].items(), key=lambda x: -x[1]):
-            bar = "█" * int(p * 30)
-            print(f"    {r}  {p:>6.1%}  {bar}")
+        ganador = HOME_CLUB if res["resultado"] == "local" else AWAY_CLUB
+        perdedor = AWAY_CLUB if res["resultado"] == "local" else HOME_CLUB
+        prob_g = res["prob_local"] if res["resultado"] == "local" else res["prob_visit"]
+        print(f"\n  Ganador predicho : {ganador}  ({prob_g:.1%})")
+        print(f"  {HOME_CLUB:<28} prob. victoria: {res['prob_local']:.1%}")
+        print(f"  {AWAY_CLUB:<28} prob. victoria: {res['prob_visit']:.1%}")
+
+        # El número de sets a simular se estima a partir de la confianza:
+        # alta confianza (>70%) → probablemente 3-0 o 3-1 (3-4 sets)
+        # baja confianza (<60%) → probablemente 3-2 (5 sets)
+        prob_max = max(res["prob_local"], res["prob_visit"])
+        total = 3 if prob_max > 0.75 else (4 if prob_max > 0.60 else 5)
+        print(f"  Sets estimados   : {total}")
 
         # 3. Simulación set a set
         print(f"\n{'─' * W}")

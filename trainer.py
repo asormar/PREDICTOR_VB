@@ -140,13 +140,13 @@ def build_match_table(df_sets: pd.DataFrame) -> pd.DataFrame:
 
     def result_label(row):
         sl, sv = int(row["sets_local"]), int(row["sets_visit"])
-        key = f"{sl}-{sv}"
-        return key if key in MATCH_RESULTS else ("3-0" if sl > sv else "0-3")
+        if sl > sv:
+            return 0   # local gana (3-0, 3-1, 3-2)
+        else:
+            return 1   # visitante gana (0-3, 1-3, 2-3)
 
-    partidos["resultado"] = partidos.apply(result_label, axis=1)
-    partidos["result_idx"] = partidos["resultado"].map(
-        {r: i for i, r in enumerate(MATCH_RESULTS)}
-    )
+    partidos["result_idx"] = partidos.apply(result_label, axis=1)
+    partidos["resultado"]  = partidos["result_idx"].map({0: "local", 1: "visitante"})
     # Ordenar cronológicamente dentro de cada temporada por jornada
     partidos["jornada_num"] = pd.to_numeric(
         partidos["jornada"].str.extract(r"(\d+)")[0], errors="coerce"
@@ -178,16 +178,25 @@ def compute_team_history(partidos: pd.DataFrame, team: str, before_idx: int,
 
     rows = []
     for _, h in hist.iterrows():
-        is_local  = h["local"] == team
-        sl = h["sets_local"] if is_local else h["sets_visit"]
-        sv = h["sets_visit"] if is_local else h["sets_local"]
+        is_local = h["local"] == team
+        sl    = h["sets_local"] if is_local else h["sets_visit"]
+        sv    = h["sets_visit"] if is_local else h["sets_local"]
         total = h["total_sets"]
+
+        # Puntos: columnas añadidas en build_match_sequences via merge
+        pf = float(h.get("pts_local_tot",  0) if is_local else h.get("pts_visit_tot", 0))
+        pc = float(h.get("pts_visit_tot",  0) if is_local else h.get("pts_local_tot", 0))
+        sl_rate    = float(h.get("sets_largos", 0)) / max(total, 1)
+        pts_fav    = pf / max(total, 1)
+        pts_con    = pc / max(total, 1)
+        pts_diff   = (pf - pc) / max(total, 1)
+
         rows.append([
-            sl / max(total, 1),          # set_win_rate
-            0.0,                         # pts_diff_avg (no disponible aquí, se rellena abajo)
-            0.0,                         # sets_largos_rate
-            0.0,                         # pts_avg_favor
-            0.0,                         # pts_avg_contra
+            sl / max(total, 1),   # set_win_rate
+            pts_diff,             # pts_diff_avg
+            sl_rate,              # sets_largos_rate
+            pts_fav,              # pts_avg_favor
+            pts_con,              # pts_avg_contra
         ])
 
     seq = np.array(rows, dtype=np.float32)
@@ -323,6 +332,11 @@ def build_set_samples(df_sets: pd.DataFrame,
       - feats_visit  (25,) — stats de los 5 jugadores del visitante
       - gana_local   int
     """
+    # Pre-calcular marcador parcial antes de cada set agrupando por partido
+    df_sets = df_sets.sort_values(["partido_id","set_num"]).copy()
+    df_sets["sl_antes"] = df_sets.groupby("partido_id")["ganador_set_local"].cumsum() - df_sets["ganador_set_local"]
+    df_sets["sv_antes"] = (df_sets["set_num"] - 1) - df_sets["sl_antes"]
+
     samples = []
     for _, row in df_sets.iterrows():
         local    = row["equipo_local"]
@@ -334,9 +348,21 @@ def build_set_samples(df_sets: pd.DataFrame,
         if fl is None or fv is None:
             continue
 
+        sl_antes = float(row["sl_antes"])
+        sv_antes = float(row["sv_antes"])
+        set_num  = float(row["set_num"])
+        # 4 features de contexto: set_num/5, sets_local/3, sets_visit/3, diff_parcial/2
+        ctx = np.array([
+            set_num / 5.0,
+            sl_antes / 3.0,
+            sv_antes / 3.0,
+            (sl_antes - sv_antes) / 2.0,
+        ], dtype=np.float32)
+
         samples.append({
             "feats_local":  fl,
             "feats_visit":  fv,
+            "ctx":          ctx,
             "gana_local":   int(row["ganador_set_local"]),
         })
 
@@ -367,7 +393,8 @@ class SetDataset(Dataset):
     def __init__(self, samples: list[dict], scaler: StandardScaler = None,
                  fit_scaler: bool = False):
         X = np.stack([
-            np.concatenate([s["feats_local"], s["feats_visit"]])
+            np.concatenate([s["feats_local"], s["feats_visit"],
+                            s.get("ctx", np.array([0.2, 0., 0., 0.]))])
             for s in samples
         ])
         if fit_scaler:
@@ -503,23 +530,26 @@ class SetTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        # +4 features de contexto: set_num, sl_antes, sv_antes, diff_parcial
         self.head = nn.Sequential(
-            nn.Linear(d_model * n_players * 2, d_model * 4),
+            nn.Linear(d_model * n_players * 2 + 4, d_model * 4),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 4, 2),   # 2 clases: gana local / gana visitante
+            nn.Linear(d_model * 4, 2),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, 50) — 25 local + 25 visitante
-        batch = x.size(0)
-        # Reshape a (batch, n_players*2, n_stats)
-        x = x.view(batch, self.n_players * 2, self.n_stats)
-        x = self.proj(x)          # (batch, 10, d_model)
-        x = self.pe(x)
-        x = self.encoder(x)       # (batch, 10, d_model)
-        x = x.reshape(batch, -1)  # (batch, 10 * d_model)
-        return self.head(x)
+        # x: (batch, 54) — 25 local + 25 visitante + 4 contexto
+        batch   = x.size(0)
+        ctx     = x[:, -4:]                           # (batch, 4) — set_num, sl, sv, diff
+        players = x[:, :-4]                           # (batch, 50)
+        players = players.view(batch, self.n_players * 2, self.n_stats)
+        players = self.proj(players)
+        players = self.pe(players)
+        players = self.encoder(players)
+        flat    = players.reshape(batch, -1)           # (batch, 10*d_model)
+        combined = torch.cat([flat, ctx], dim=-1)      # (batch, 10*d_model + 4)
+        return self.head(combined)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -566,10 +596,14 @@ def eval_epoch(model, loader, criterion, device):
 
 
 def train_model(model, train_loader, val_loader, epochs: int,
-                lr: float, device, name: str):
+                lr: float, device, name: str, class_weights=None):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.CrossEntropyLoss()
+    if class_weights is not None:
+        w = torch.tensor(class_weights, dtype=torch.float32).to(device)
+        criterion = nn.CrossEntropyLoss(weight=w)
+    else:
+        criterion = nn.CrossEntropyLoss()
     best_val_acc, best_state = 0.0, None
 
     print(f"\n  Entrenando {name} ({epochs} épocas)...")
@@ -682,12 +716,22 @@ if __name__ == "__main__":
         tr_loader  = DataLoader(MatchDataset(tr_s), batch_size=16, shuffle=True)
         va_loader  = DataLoader(MatchDataset(va_s), batch_size=16)
 
-        match_cfg = dict(d_model=64, nhead=4, num_layers=2, dropout=0.1, num_classes=6)
+        match_cfg = dict(d_model=64, nhead=4, num_layers=2, dropout=0.1, num_classes=3)
         match_model = MatchTransformer(**match_cfg).to(DEVICE)
+
+        # Pesos de clase inversos a la frecuencia: local_win=86%, visit_win=86% → peso bajo
+        # El modelo debe aprender a distinguir, no solo predecir la clase mayoritaria.
+        # Calculamos pesos a partir de los datos reales.
+        labels = [s["result_idx"] for s in tr_s]
+        counts = np.bincount(labels, minlength=3).astype(float)
+        counts = np.where(counts == 0, 1, counts)
+        weights = (len(labels) / (len(counts) * counts)).tolist()
+        print(f"  Pesos de clase: {[round(w,2) for w in weights]}")
 
         match_model = train_model(
             match_model, tr_loader, va_loader,
-            epochs=80, lr=1e-3, device=DEVICE, name="MatchTransformer"
+            epochs=100, lr=5e-4, device=DEVICE, name="MatchTransformer",
+            class_weights=weights,
         )
 
     # ── Módulo 2: Set Transformer ──────────────────────────────────
