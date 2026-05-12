@@ -39,6 +39,7 @@ from trainer import (
 # ═════════════════════════════════════════════════════════════════
 
 MODEL_PATH = "model/vb_transformer.pkl"
+MONTE_CARLO_SIMULATIONS = 1000
 
 HOME_CLUB = "Monza"
 AWAY_CLUB = "Milano"
@@ -375,6 +376,123 @@ def simular_sets(
     print(f"  Ganador: {ganador_final}".center(W))
     print(f"{'═' * W}\n")
 
+def simular_un_partido(
+        vb,
+        home,
+        away,
+        season,
+        total_sets,
+        prob_match_local,
+    ):
+    """
+    Ejecuta UNA simulación completa de partido
+    y devuelve:
+        ganador,
+        sets_local,
+        sets_visit
+    """
+
+    sets_local = 0
+    sets_visit = 0
+
+    prob_partido_actual = prob_match_local
+
+    for set_num in range(1, total_sets + 1):
+
+        if sets_local >= 3 or sets_visit >= 3:
+            break
+
+        prob_l = predecir_set(
+            vb,
+            home,
+            away,
+            season,
+            set_num=set_num,
+            sets_local_antes=sets_local,
+            sets_visit_antes=sets_visit,
+        )
+
+        if prob_l is None:
+            break
+
+        # Combinar set + partido
+        prob_l = 0.7 * prob_l + 0.3 * prob_match_local
+
+        # Calibrar
+        prob_l = calibrar_probabilidad(prob_l)
+
+        gana_l = np.random.random() < prob_l
+
+        if gana_l:
+            sets_local += 1
+        else:
+            sets_visit += 1
+
+        prob_partido_actual = actualizar_prob_partido(
+            prob_partido_actual,
+            prob_l,
+            gana_l
+        )
+
+    ganador = home if sets_local > sets_visit else away
+
+    return ganador, sets_local, sets_visit
+
+def monte_carlo_partido(
+        vb,
+        home,
+        away,
+        season,
+        total_sets,
+        prob_match_local,
+        n_sim=1000
+    ):
+    """
+    Ejecuta muchas simulaciones y calcula:
+        - % victorias
+        - marcadores más frecuentes
+    """
+
+    resultados = {}
+
+    victorias_local = 0
+    victorias_visit = 0
+
+    for _ in range(n_sim):
+
+        ganador, sl, sv = simular_un_partido(
+            vb,
+            home,
+            away,
+            season,
+            total_sets,
+            prob_match_local
+        )
+
+        marcador = f"{sl}-{sv}"
+
+        resultados[marcador] = resultados.get(marcador, 0) + 1
+
+        if ganador == home:
+            victorias_local += 1
+        else:
+            victorias_visit += 1
+
+    prob_local = victorias_local / n_sim
+    prob_visit = victorias_visit / n_sim
+
+    resultados_ordenados = sorted(
+        resultados.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return {
+        "prob_local": prob_local,
+        "prob_visit": prob_visit,
+        "resultados": resultados_ordenados
+    }
+
 def calibrar_probabilidad(prob: float,
                            strength: float = 0.4,
                            min_p: float = 0.15,
@@ -456,6 +574,31 @@ if __name__ == "__main__":
             total_sets=total,
             prob_match_local=res["prob_local"],
         )
+
+        # 4. Monte Carlo
+        print(f"\n{'─' * W}")
+        print(f"  MÓDULO 3 — Monte Carlo ({MONTE_CARLO_SIMULATIONS} simulaciones)")
+        print(f"{'─' * W}")
+
+        mc = monte_carlo_partido(
+            vb,
+            HOME_CLUB,
+            AWAY_CLUB,
+            SEASON,
+            total_sets=total,
+            prob_match_local=res["prob_local"],
+            n_sim=MONTE_CARLO_SIMULATIONS
+        )
+
+        print(f"\n  {HOME_CLUB:<28} victorias: {mc['prob_local']:.1%}")
+        print(f"  {AWAY_CLUB:<28} victorias: {mc['prob_visit']:.1%}")
+
+        print(f"\n  RESULTADOS MÁS PROBABLES")
+        print(f"  {'─' * (W - 4)}")
+
+        for marcador, veces in mc["resultados"][:5]:
+            pct = veces / MONTE_CARLO_SIMULATIONS
+            print(f"  {marcador:<10} {pct:.1%}")
     else:
         print("  No se pudo generar predicción.")
 
