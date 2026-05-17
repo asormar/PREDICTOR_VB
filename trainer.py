@@ -716,14 +716,14 @@ if __name__ == "__main__":
         tr_loader  = DataLoader(MatchDataset(tr_s), batch_size=16, shuffle=True)
         va_loader  = DataLoader(MatchDataset(va_s), batch_size=16)
 
-        match_cfg = dict(d_model=64, nhead=4, num_layers=2, dropout=0.1, num_classes=3)
+        match_cfg = dict(d_model=64, nhead=4, num_layers=2, dropout=0.1, num_classes=2)
         match_model = MatchTransformer(**match_cfg).to(DEVICE)
 
         # Pesos de clase inversos a la frecuencia: local_win=86%, visit_win=86% → peso bajo
         # El modelo debe aprender a distinguir, no solo predecir la clase mayoritaria.
         # Calculamos pesos a partir de los datos reales.
         labels = [s["result_idx"] for s in tr_s]
-        counts = np.bincount(labels, minlength=3).astype(float)
+        counts = np.bincount(labels, minlength=2).astype(float)
         counts = np.where(counts == 0, 1, counts)
         weights = (len(labels) / (len(counts) * counts)).tolist()
         print(f"  Pesos de clase: {[round(w,2) for w in weights]}")

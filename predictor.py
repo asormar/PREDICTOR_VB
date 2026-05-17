@@ -41,8 +41,8 @@ from trainer import (
 MODEL_PATH = "model/vb_transformer.pkl"
 MONTE_CARLO_SIMULATIONS = 1000
 
-HOME_CLUB = "Monza"
-AWAY_CLUB = "Milano"
+HOME_CLUB = "Modena"
+AWAY_CLUB = "Piacenza"
 SEASON    = "2024/2025"
 
 
@@ -236,16 +236,17 @@ def predecir_partido(vb: VBTransformerPredictor,
         logits = vb.match_model(t_l, t_v)
         probs  = torch.softmax(logits, dim=-1).squeeze().numpy()
 
-    # 3 clases: 0=local gana, 1=visitante gana
-    pred_idx = int(probs.argmax())
-    prob_local  = float(probs[0])
-    prob_visit  = float(probs[1])
+    # 2 clases: 0=local gana, 1=visitante gana
+    # Normalizar las 2 primeras probs para que sumen 1 (ignora clase extra si existe)
+    p0, p1 = float(probs[0]), float(probs[1])
+    total = p0 + p1
+    prob_local = p0 / total if total > 0 else 0.5
+    prob_visit = p1 / total if total > 0 else 0.5
 
     return {
-        "resultado":  "local" if pred_idx == 0 else "visitante",
+        "resultado":  "local" if prob_local > prob_visit else "visitante",
         "prob_local": prob_local,
         "prob_visit": prob_visit,
-        "probs":      {"local gana": prob_local, "visitante gana": prob_visit},
     }
 
 
@@ -321,11 +322,9 @@ def simular_sets(
             print("  ⚠️  SetTransformer no disponible para este partido.")
             break
 
-        # Combinar predicción del set con la del partido
-        prob_l = 0.7 * prob_l + 0.3 * prob_match_local
-
-        # Calibrar probabilidades extremas
-        prob_l = calibrar_probabilidad(prob_l)
+        # Usar directamente la predicción del SetTransformer.
+        # Monte Carlo es el árbitro: simula miles de partidos y da la prob final.
+        # No mezclamos aquí con MatchTransformer para evitar incoherencias.
 
         prob_v    = 1.0 - prob_l
         gana_l = np.random.random() < prob_l
@@ -415,11 +414,7 @@ def simular_un_partido(
         if prob_l is None:
             break
 
-        # Combinar set + partido
-        prob_l = 0.7 * prob_l + 0.3 * prob_match_local
-
-        # Calibrar
-        prob_l = calibrar_probabilidad(prob_l)
+        # Usar directamente prob del SetTransformer (Monte Carlo es el árbitro final).
 
         gana_l = np.random.random() < prob_l
 
@@ -542,65 +537,55 @@ if __name__ == "__main__":
     print(f"{'─' * W}")
     res = predecir_partido(vb, HOME_CLUB, AWAY_CLUB, SEASON)
 
+    # ── Contexto del MatchTransformer (informativo, no decisivo) ────────
     if res:
-        ganador = HOME_CLUB if res["resultado"] == "local" else AWAY_CLUB
-        perdedor = AWAY_CLUB if res["resultado"] == "local" else HOME_CLUB
-        prob_g = res["prob_local"] if res["resultado"] == "local" else res["prob_visit"]
-        print(f"\n  Ganador predicho : {ganador}  ({prob_g:.1%})")
-        print(f"  {HOME_CLUB:<28} prob. victoria: {res['prob_local']:.1%}")
-        print(f"  {AWAY_CLUB:<28} prob. victoria: {res['prob_visit']:.1%}")
-
-        # El número de sets a simular se estima a partir de la confianza:
-        # alta confianza (>70%) → probablemente 3-0 o 3-1 (3-4 sets)
-        # baja confianza (<60%) → probablemente 3-2 (5 sets)
-        prob_max = max(res["prob_local"], res["prob_visit"])
-        if prob_max > 0.80:
-            total = 3
-        elif prob_max > 0.65:
-            total = 4
-        else:
-            total = 5
-        print(f"  Sets estimados   : {total}")
-
-        # 3. Simulación set a set
-        print(f"\n{'─' * W}")
-        print(f"  MÓDULO 2 — Simulación set a set")
-        print(f"{'─' * W}")
-        simular_sets(
-            vb,
-            HOME_CLUB,
-            AWAY_CLUB,
-            SEASON,
-            total_sets=total,
-            prob_match_local=res["prob_local"],
-        )
-
-        # 4. Monte Carlo
-        print(f"\n{'─' * W}")
-        print(f"  MÓDULO 3 — Monte Carlo ({MONTE_CARLO_SIMULATIONS} simulaciones)")
-        print(f"{'─' * W}")
-
-        mc = monte_carlo_partido(
-            vb,
-            HOME_CLUB,
-            AWAY_CLUB,
-            SEASON,
-            total_sets=total,
-            prob_match_local=res["prob_local"],
-            n_sim=MONTE_CARLO_SIMULATIONS
-        )
-
-        print(f"\n  {HOME_CLUB:<28} victorias: {mc['prob_local']:.1%}")
-        print(f"  {AWAY_CLUB:<28} victorias: {mc['prob_visit']:.1%}")
-
-        print(f"\n  RESULTADOS MÁS PROBABLES")
-        print(f"  {'─' * (W - 4)}")
-
-        for marcador, veces in mc["resultados"][:5]:
-            pct = veces / MONTE_CARLO_SIMULATIONS
-            print(f"  {marcador:<10} {pct:.1%}")
+        print(f"\n  Contexto histórico (MatchTransformer):")
+        print(f"  {HOME_CLUB:<28} prob. hist.: {res['prob_local']:.1%}")
+        print(f"  {AWAY_CLUB:<28} prob. hist.: {res['prob_visit']:.1%}")
+        prob_match_local = res["prob_local"]
     else:
-        print("  No se pudo generar predicción.")
+        print("  (MatchTransformer no disponible — usando solo SetTransformer)")
+        prob_match_local = 0.5
+
+    # ── Monte Carlo: predictor principal ─────────────────────────────
+    # Simula N partidos completos usando el SetTransformer por set.
+    # El resultado de Monte Carlo ES la predicción final del sistema.
+    print(f"\n{'─' * W}")
+    print(f"  RESULTADO FINAL — Monte Carlo ({MONTE_CARLO_SIMULATIONS} simulaciones)")
+    print(f"{'─' * W}")
+
+    mc = monte_carlo_partido(
+        vb,
+        HOME_CLUB,
+        AWAY_CLUB,
+        SEASON,
+        total_sets=5,      # siempre simular hasta 5, Monte Carlo decide cuántos se juegan
+        prob_match_local=prob_match_local,
+        n_sim=MONTE_CARLO_SIMULATIONS
+    )
+
+    ganador_mc = HOME_CLUB if mc["prob_local"] > mc["prob_visit"] else AWAY_CLUB
+    print(f"\n  Ganador predicho : {ganador_mc}")
+    print(f"  {HOME_CLUB:<28} {mc['prob_local']:.1%}")
+    print(f"  {AWAY_CLUB:<28} {mc['prob_visit']:.1%}")
+    print(f"\n  Resultados más frecuentes:")
+    for marcador, veces in mc["resultados"][:5]:
+        pct = veces / MONTE_CARLO_SIMULATIONS
+        bar = "█" * int(pct * 30)
+        print(f"    {marcador:<8} {pct:.1%}  {bar}")
+
+    # ── Simulación set a set (una muestra representativa) ────────────
+    print(f"\n{'─' * W}")
+    print(f"  SIMULACIÓN SET A SET (partido de ejemplo)")
+    print(f"{'─' * W}")
+    simular_sets(
+        vb,
+        HOME_CLUB,
+        AWAY_CLUB,
+        SEASON,
+        total_sets=5,
+        prob_match_local=prob_match_local,
+    )
 
     # 4. Resumen jugadores al final
     print(f"{'─' * W}")
