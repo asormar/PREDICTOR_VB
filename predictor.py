@@ -41,8 +41,8 @@ from trainer import (
 MODEL_PATH = "model/vb_transformer.pkl"
 MONTE_CARLO_SIMULATIONS = 1000
 
-HOME_CLUB = "Monza"
-AWAY_CLUB = "Milano"
+HOME_CLUB = "Modena"
+AWAY_CLUB = "Verona"
 SEASON    = "2024/2025"
 
 
