@@ -41,8 +41,8 @@ from trainer import (
 MODEL_PATH = "model/vb_transformer.pkl"
 MONTE_CARLO_SIMULATIONS = 1000
 
-HOME_CLUB = "Modena"
-AWAY_CLUB = "Piacenza"
+HOME_CLUB = "Monza"
+AWAY_CLUB = "Milano"
 SEASON    = "2024/2025"
 
 
@@ -586,9 +586,3 @@ if __name__ == "__main__":
         total_sets=5,
         prob_match_local=prob_match_local,
     )
-
-    # 4. Resumen jugadores al final
-    print(f"{'─' * W}")
-    print(f"  REFERENCIA RENDIMIENTO TEMPORADA {SEASON}")
-    print(f"{'─' * W}")
-    mostrar_jugadores(vb, HOME_CLUB, AWAY_CLUB, SEASON)
