@@ -147,6 +147,18 @@ FORMA_VENTANA = 5
 # Regla práctica: K entre 5 y 20. Aquí usamos 10.
 SHRINKAGE_K = 10
 
+# ── Elo rating ────────────────────────────────────────────────────
+# K-factor: cuánto cambia el Elo tras cada partido.
+# En voleibol con pocos partidos/temporada usamos K alto (32)
+# para que el rating reaccione rápido a cambios de forma.
+ELO_K        = 32
+ELO_INITIAL  = 1500   # rating inicial para equipos sin historial
+ELO_HOME_ADV = 30     # ventaja de campo en puntos Elo (~54% win para local)
+
+# ── Point ratio / Set ratio rolling ──────────────────────────────
+# Ventana rolling para ratios de rendimiento (últimos N partidos)
+RATIO_VENTANA = 10
+
 
 def normalize_club(name: str) -> str:
     s = str(name).strip()
@@ -491,7 +503,223 @@ def compute_team_features_at(team: str, condition: str,
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 5. RANKING APROXIMADO POR TEMPORADA
+# 5. ELO RATING
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_elo(partidos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula el Elo de cada equipo ANTES de cada partido (sin data leakage).
+
+    Variantes generadas:
+      - elo_h / elo_a         : Elo global acumulado entre temporadas
+      - elo_h_home / elo_a_away : Elo condicionado a condición de juego
+      - elo_diff              : diferencia de Elo (h - a), ajustada por ventaja local
+      - elo_win_prob_h        : probabilidad implícita del Elo para el local
+
+    El Elo se reinicia parcialmente al cambiar de temporada:
+      elo_new_season = 0.75 * elo_final + 0.25 * ELO_INITIAL
+    Esto refleja que los cambios de plantilla entre temporadas hacen que
+    el Elo del año anterior no sea completamente transferible.
+
+    Retorna DataFrame con partido_id + columnas Elo.
+    """
+    elo       = {}      # equipo → elo global
+    elo_home  = {}      # equipo → elo como local
+    elo_away  = {}      # equipo → elo como visitante
+    records   = []
+    prev_season = None
+
+    for _, row in partidos.iterrows():
+        local  = row["local"]
+        visit  = row["visitante"]
+        season = row["temporada"]
+
+        # ── Reinicio parcial al cambiar de temporada ─────────────
+        if season != prev_season and prev_season is not None:
+            for team in list(elo.keys()):
+                elo[team]      = 0.75 * elo[team]      + 0.25 * ELO_INITIAL
+                elo_home[team] = 0.75 * elo_home[team] + 0.25 * ELO_INITIAL
+                elo_away[team] = 0.75 * elo_away[team] + 0.25 * ELO_INITIAL
+        prev_season = season
+
+        # Elo ANTES del partido (lo que el modelo ve)
+        elo_h = elo.get(local, ELO_INITIAL)
+        elo_a = elo.get(visit, ELO_INITIAL)
+        elo_h_home = elo_home.get(local, ELO_INITIAL)
+        elo_a_away = elo_away.get(visit, ELO_INITIAL)
+
+        # Probabilidad esperada según Elo (con ventaja de campo)
+        diff_global = (elo_h + ELO_HOME_ADV) - elo_a
+        diff_home   = (elo_h_home + ELO_HOME_ADV) - elo_a_away
+        exp_h_global = 1.0 / (1.0 + 10 ** (-diff_global / 400))
+        exp_h_home   = 1.0 / (1.0 + 10 ** (-diff_home   / 400))
+
+        records.append({
+            "partido_id":      row["partido_id"],
+            "elo_h":           round(elo_h, 1),
+            "elo_a":           round(elo_a, 1),
+            "elo_h_home":      round(elo_h_home, 1),
+            "elo_a_away":      round(elo_a_away, 1),
+            "elo_diff":        round(elo_h - elo_a, 1),
+            "elo_win_prob_h":  round(exp_h_global, 4),  # P(gana local) según Elo
+        })
+
+        # ── Actualizar Elo tras conocer el resultado ──────────────
+        resultado = float(row["gana_local"])  # 1 si gana local, 0 si gana visit
+
+        # Actualización global
+        elo[local]  = elo.get(local,  ELO_INITIAL) + ELO_K * (resultado - exp_h_global)
+        elo[visit]  = elo.get(visit,  ELO_INITIAL) + ELO_K * ((1 - resultado) - (1 - exp_h_global))
+
+        # Actualización condicionada (Elo_home para el local, Elo_away para el visitante)
+        elo_home[local] = elo_home.get(local, ELO_INITIAL) + ELO_K * (resultado - exp_h_home)
+        elo_away[visit] = elo_away.get(visit, ELO_INITIAL) + ELO_K * ((1 - resultado) - (1 - exp_h_home))
+
+    return pd.DataFrame(records)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5b. POINT RATIO Y SET RATIO ROLLING
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_rolling_ratios(partidos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula ratios de rendimiento rolling (últimos RATIO_VENTANA partidos)
+    para cada equipo ANTES de cada partido.
+
+    Features generadas:
+      - set_ratio_h / set_ratio_a:
+          sets_ganados / sets_jugados (últimos N partidos).
+          Más informativo que win_rate porque diferencia un 3-0 de un 3-2.
+
+      - point_ratio_h / point_ratio_a:
+          puntos_a_favor / puntos_totales (últimos N partidos).
+          Análogo al pythagorean expectation en béisbol.
+          Un 3-0 dominante da un ratio ~0.60+; un 3-2 ajustado da ~0.52.
+
+      - dominancia_h / dominancia_a:
+          (sets_fav - sets_con) / sets_jugados (últimos N partidos).
+          Mide si el equipo gana con comodidad o al límite.
+
+    Todos con shrinkage hacia la prior cuando hay pocos partidos.
+    """
+    # Prior global de la liga (para shrinkage)
+    total_sets_local = partidos["sets_local"].sum()
+    total_sets_visit = partidos["sets_visit"].sum()
+    total_sets       = total_sets_local + total_sets_visit
+    prior_set_ratio  = total_sets_local / total_sets  # ~0.55
+
+    # Puntos por set: en la tabla de partidos solo tenemos sets, no puntos
+    # Usamos sets como proxy (sets_fav = "puntos" a favor en esta métrica)
+    prior_point_ratio = prior_set_ratio
+
+    records = []
+
+    for _, row in partidos.iterrows():
+        pid   = row["partido_id"]
+        local = row["local"]
+        visit = row["visitante"]
+        mo    = row["match_order"]
+
+        antes = partidos[partidos["match_order"] < mo]
+
+        def rolling_ratio(team):
+            mask  = (antes["local"] == team) | (antes["visitante"] == team)
+            hist  = antes[mask].tail(RATIO_VENTANA).copy()
+            n     = len(hist)
+            if n == 0:
+                return {
+                    "set_ratio":   prior_set_ratio,
+                    "point_ratio": prior_point_ratio,
+                    "dominancia":  0.0,
+                }
+            sets_fav = np.where(hist["local"] == team, hist["sets_local"], hist["sets_visit"])
+            sets_con = np.where(hist["local"] == team, hist["sets_visit"], hist["sets_local"])
+            sf = sets_fav.sum()
+            sc = sets_con.sum()
+            sj = sf + sc
+            set_ratio   = shrink(sf / sj if sj > 0 else prior_set_ratio,
+                                 n, prior_set_ratio)
+            point_ratio = set_ratio   # proxy: usamos sets como proxy de puntos
+            dominancia  = shrink((sf - sc) / sj if sj > 0 else 0.0,
+                                 n, 0.0)
+            return {
+                "set_ratio":   round(set_ratio, 4),
+                "point_ratio": round(point_ratio, 4),
+                "dominancia":  round(dominancia, 4),
+            }
+
+        rh = rolling_ratio(local)
+        ra = rolling_ratio(visit)
+
+        records.append({
+            "partido_id":       pid,
+            "set_ratio_h":      rh["set_ratio"],
+            "set_ratio_a":      ra["set_ratio"],
+            "point_ratio_h":    rh["point_ratio"],
+            "point_ratio_a":    ra["point_ratio"],
+            "dominancia_h":     rh["dominancia"],
+            "dominancia_a":     ra["dominancia"],
+            "diff_set_ratio":   rh["set_ratio"]   - ra["set_ratio"],
+            "diff_dominancia":  rh["dominancia"]  - ra["dominancia"],
+        })
+
+    return pd.DataFrame(records)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5c. STRENGTH OF SCHEDULE (SOS)
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_sos(partidos: pd.DataFrame, elo_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula el Strength of Schedule de cada equipo ANTES de cada partido:
+    media del Elo de los rivales enfrentados en los últimos N partidos.
+
+    Esto responde a: ¿ha ganado este equipo contra rivales fuertes o débiles?
+    Un win_rate del 80% contra equipos de 1400 Elo no es lo mismo que
+    contra equipos de 1600 Elo.
+
+    Normalizado: SOS = (elo_medio_rivales - ELO_INITIAL) / 200
+    para que quede en una escala aproximada de -2 a +2.
+    """
+    # Añadir Elo a la tabla de partidos para consultas
+    p = partidos.merge(elo_df[["partido_id","elo_h","elo_a"]], on="partido_id")
+
+    records = []
+
+    for _, row in partidos.iterrows():
+        pid   = row["partido_id"]
+        local = row["local"]
+        visit = row["visitante"]
+        mo    = row["match_order"]
+
+        antes = p[p["match_order"] < mo]
+
+        def sos_team(team):
+            mask_l = antes["local"]     == team
+            mask_v = antes["visitante"] == team
+            hist   = antes[mask_l | mask_v].tail(RATIO_VENTANA)
+            n = len(hist)
+            if n == 0:
+                return 0.0
+            # Elo del rival en cada partido
+            rival_elos = np.where(hist["local"] == team, hist["elo_a"], hist["elo_h"])
+            sos_raw = rival_elos.mean()
+            return round((sos_raw - ELO_INITIAL) / 200, 4)
+
+        records.append({
+            "partido_id":   pid,
+            "sos_h":        sos_team(local),
+            "sos_a":        sos_team(visit),
+            "diff_sos":     sos_team(local) - sos_team(visit),
+        })
+
+    return pd.DataFrame(records)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. RANKING APROXIMADO POR TEMPORADA
 # ═══════════════════════════════════════════════════════════════════
 
 def compute_rankings(partidos: pd.DataFrame) -> pd.DataFrame:
