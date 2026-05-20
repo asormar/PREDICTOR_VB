@@ -483,7 +483,7 @@ def compute_team_features_at(team: str, condition: str,
         f"{prefix}forma_away":            round(forma_away, 4),
         f"{prefix}ultimo_set_diff":       int(ultimo_set_diff),
         f"{prefix}racha":                 int(racha),
-        f"{prefix}n_partidos_hist":       int(n_partidos_hist),
+        #f"{prefix}n_partidos_hist":       int(n_partidos_hist),
         f"{prefix}h2h_set_diff_exp":      round(h2h_set_diff_exp, 4),
         f"{prefix}h2h_win_rate":          round(h2h_win_rate, 4),
     }
@@ -860,15 +860,15 @@ def main():
     print(f"    Features numéricas: {len(feature_cols)}")
 
     # Verificación del efecto del shrinkage
-    print(f"\n  Verificación shrinkage bayesiano (K={SHRINKAGE_K}):")
-    low_hist  = match_feats[match_feats["h_n_partidos_hist"] <= 3]
-    high_hist = match_feats[match_feats["h_n_partidos_hist"] >= 20]
-    print(f"    Partidos con ≤3 partidos de historial (local): {len(low_hist)}")
-    print(f"      win_rate_global medio : {low_hist['h_win_rate_global'].mean():.3f}  "
-          f"(sin shrinkage sería ~0.5 exacto, con ruido alto)")
-    print(f"    Partidos con ≥20 partidos de historial (local): {len(high_hist)}")
-    print(f"      win_rate_global medio : {high_hist['h_win_rate_global'].mean():.3f}  "
-          f"(shrinkage apenas influye)")
+    # print(f"\n  Verificación shrinkage bayesiano (K={SHRINKAGE_K}):")
+    # low_hist  = match_feats[match_feats["h_n_partidos_hist"] <= 3]
+    # high_hist = match_feats[match_feats["h_n_partidos_hist"] >= 20]
+    # print(f"    Partidos con ≤3 partidos de historial (local): {len(low_hist)}")
+    # print(f"      win_rate_global medio : {low_hist['h_win_rate_global'].mean():.3f}  "
+    #       f"(sin shrinkage sería ~0.5 exacto, con ruido alto)")
+    # print(f"    Partidos con ≥20 partidos de historial (local): {len(high_hist)}")
+    # print(f"      win_rate_global medio : {high_hist['h_win_rate_global'].mean():.3f}  "
+    #       f"(shrinkage apenas influye)")
 
     print(f"\n  set_features.csv")
     print(f"    Sets totales     : {len(set_feats)}")
